@@ -2,9 +2,8 @@
 """
 Diálogo de Configuración de Reglas.
 
-Este archivo define el QDialog (ventana emergente) que permite
-al usuario gestionar las reglas de puntuación (Keywords y Organismos).
-Implementa la GUI para la Idea #2.
+Versión 7.2 (Corrige QInputDialog.getInt)
+- Corregido el AttributeError por usar 'min' y 'max' como keywords.
 """
 
 from PySide6.QtWidgets import (
@@ -24,61 +23,61 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QMessageBox,
     QTableWidgetItem,
+    QMenu,         
+    QInputDialog,  
 )
+from PySide6.QtGui import QColor, QBrush
 from PySide6.QtCore import Signal, Slot, Qt
 
 from src.utils.logger import configurar_logger
 from src.db.db_service import DbService
-# Importar los modelos necesarios para type hinting
-from src.db.db_models import CaKeyword, CaOrganismo, CaOrganismoPrioritario
+# --- ¡CAMBIOS DE IMPORTACIÓN! ---
+from src.db.db_models import (
+    CaKeyword, 
+    CaOrganismo, 
+    CaOrganismoRegla,      
+    TipoReglaOrganismo,  
+)
 
 logger = configurar_logger(__name__)
+
+# --- Colores para los estados ---
+COLOR_PRIORITARIO = QColor(230, 255, 230) # Verde claro
+COLOR_NO_DESEADO = QColor(255, 230, 230) # Rojo claro
+COLOR_NEUTRO = QColor("white")
 
 
 class GuiSettingsDialog(QDialog):
     """
     Ventana de diálogo modal para gestionar las reglas de puntuación.
     """
-
-    # Señal que se emite si se realiza un cambio
     reglas_actualizadas = Signal()
 
     def __init__(self, db_service: DbService, parent: QWidget | None = None):
-        """
-        Inicializa el diálogo.
-
-        Args:
-            db_service: La instancia del servicio de BD (inyectada).
-            parent: El widget padre (usualmente la MainWindow).
-        """
         super().__init__(parent)
         self.setWindowTitle("Configuración del Motor de Puntuación")
         self.setModal(True)
-        self.setMinimumSize(700, 500)
+        self.setMinimumSize(800, 600) 
 
         self.db_service = db_service
-        self.reglas_han_cambiado = False # Flag para saber si emitir la señal
+        self.reglas_han_cambiado = False
+        
+        self.organismo_data_cache: dict[int, tuple[QTableWidgetItem, str, int | None]] = {}
 
-        # --- Layout Principal ---
         layout = QVBoxLayout(self)
-
-        # --- Sistema de Pestañas ---
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
 
-        # Crear las dos pestañas
         self.tab_keywords = self._crear_tab_keywords()
-        self.tab_organismos = self._crear_tab_organismos()
+        self.tab_organismos = self._crear_tab_organismos() 
 
         self.tabs.addTab(self.tab_keywords, "Gestión de Keywords")
-        self.tabs.addTab(self.tab_organismos, "Gestión de Organismos Prioritarios")
+        self.tabs.addTab(self.tab_organismos, "Gestión de Reglas de Organismo")
 
-        # --- Botón de Cierre ---
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         button_box.rejected.connect(self.on_close)
         layout.addWidget(button_box)
 
-        # Cargar los datos iniciales
         try:
             self._load_all_data()
         except Exception as e:
@@ -87,74 +86,59 @@ class GuiSettingsDialog(QDialog):
 
     @Slot()
     def on_close(self):
-        """Se llama al presionar 'Cerrar'."""
         if self.reglas_han_cambiado:
             self.reglas_actualizadas.emit()
-        self.reject() # Cierra el diálogo
+        self.reject()
 
     def _load_all_data(self):
         """Carga los datos en ambas tablas."""
         self._load_keywords_table()
-        self._load_organismos_table()
-        self._load_organismos_combobox()
+        
+        self.organismo_data_cache.clear()
+        self._load_organismos_table_master()
 
-    # --- Pestaña de Keywords ---
-
+    # --- Pestaña de Keywords (SIN CAMBIOS) ---
     def _crear_tab_keywords(self) -> QWidget:
-        """Crea el widget de la pestaña de Keywords."""
         widget = QWidget()
         layout = QHBoxLayout(widget)
-
-        # Columna Izquierda (Tabla)
         left_layout = QVBoxLayout()
         left_layout.addWidget(QLabel("Keywords Actuales:"))
-
         self.keywords_table = QTableWidget()
-        self.keywords_table.setColumnCount(4) # ID (oculto), Keyword, Tipo, Puntos
+        self.keywords_table.setColumnCount(4)
         self.keywords_table.setHorizontalHeaderLabels(["ID", "Keyword", "Tipo", "Puntos"])
         self.keywords_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.keywords_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.keywords_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.keywords_table.setColumnHidden(0, True) # Ocultar el ID
+        self.keywords_table.setColumnHidden(0, True)
         left_layout.addWidget(self.keywords_table)
-
         self.kw_delete_button = QPushButton("Eliminar Keyword Seleccionada")
         self.kw_delete_button.clicked.connect(self._on_delete_keyword)
         left_layout.addWidget(self.kw_delete_button)
-
-        # Columna Derecha (Añadir)
         right_layout = QVBoxLayout()
         right_layout.addWidget(QLabel("Añadir Nueva Keyword:"))
-
         right_layout.addWidget(QLabel("Palabra (ej. 'notebook', 'servicio'):"))
         self.kw_input = QLineEdit()
         right_layout.addWidget(self.kw_input)
-
         right_layout.addWidget(QLabel("Tipo de Keyword:"))
         self.kw_tipo_combo = QComboBox()
         self.kw_tipo_combo.addItem("Título Positivo (Suma)", "titulo_pos")
         self.kw_tipo_combo.addItem("Título Negativo (Resta)", "titulo_neg")
         self.kw_tipo_combo.addItem("Producto (Suma)", "producto")
         right_layout.addWidget(self.kw_tipo_combo)
-
         right_layout.addWidget(QLabel("Puntos (ej. 5 o -10):"))
         self.kw_puntos_spin = QSpinBox()
         self.kw_puntos_spin.setRange(-100, 100)
         self.kw_puntos_spin.setValue(5)
         right_layout.addWidget(self.kw_puntos_spin)
-
         self.kw_add_button = QPushButton("Añadir Keyword")
         self.kw_add_button.clicked.connect(self._on_add_keyword)
         right_layout.addWidget(self.kw_add_button)
-
         right_layout.addStretch()
-
         layout.addLayout(left_layout, 3)
         layout.addLayout(right_layout, 1)
         return widget
 
     def _load_keywords_table(self):
-        """Recarga la tabla de keywords desde la BD."""
         self.keywords_table.setRowCount(0)
         try:
             keywords = self.db_service.get_all_keywords()
@@ -170,172 +154,246 @@ class GuiSettingsDialog(QDialog):
 
     @Slot()
     def _on_add_keyword(self):
-        """Se llama al hacer clic en 'Añadir Keyword'."""
         keyword = self.kw_input.text().strip().lower()
         tipo = self.kw_tipo_combo.currentData()
         puntos = self.kw_puntos_spin.value()
-
         if not keyword:
             QMessageBox.warning(self, "Error", "El campo 'Keyword' no puede estar vacío.")
             return
-
         try:
             self.db_service.add_keyword(keyword, tipo, puntos)
             self.reglas_han_cambiado = True
             self.kw_input.clear()
-            self._load_keywords_table() # Recargar la tabla
+            self._load_keywords_table()
         except Exception as e:
             logger.error(f"Error al añadir keyword: {e}")
             QMessageBox.critical(self, "Error", f"No se pudo añadir la keyword (¿ya existe?):\n{e}")
 
     @Slot()
     def _on_delete_keyword(self):
-        """Se llama al hacer clic en 'Eliminar Keyword'."""
         selected_items = self.keywords_table.selectedItems()
         if not selected_items:
             QMessageBox.warning(self, "Error", "Seleccione una fila para eliminar.")
             return
-
         row = selected_items[0].row()
         keyword_id_text = self.keywords_table.item(row, 0).text()
         keyword_id = int(keyword_id_text)
         keyword_texto = self.keywords_table.item(row, 1).text()
-
         confirm = QMessageBox.question(
-            self,
-            "Confirmar",
-            f"¿Está seguro de que quiere eliminar la keyword '{keyword_texto}'?",
+            self, "Confirmar", f"¿Está seguro de que quiere eliminar la keyword '{keyword_texto}'?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-
         if confirm == QMessageBox.StandardButton.Yes:
             try:
                 self.db_service.delete_keyword(keyword_id)
                 self.reglas_han_cambiado = True
-                self._load_keywords_table() # Recargar la tabla
+                self._load_keywords_table()
             except Exception as e:
                 logger.error(f"Error al eliminar keyword: {e}")
                 QMessageBox.critical(self, "Error", f"No se pudo eliminar la keyword:\n{e}")
 
-    # --- Pestaña de Organismos ---
+
+    # --- Pestaña de Organismos (REDİSEÑADA) ---
 
     def _crear_tab_organismos(self) -> QWidget:
-        """Crea el widget de la pestaña de Organismos."""
+        """Crea el widget de la pestaña de Organismos (Diseño Maestro)."""
         widget = QWidget()
-        layout = QHBoxLayout(widget)
+        layout = QVBoxLayout(widget)
 
-        # Columna Izquierda (Tabla)
-        left_layout = QVBoxLayout()
-        left_layout.addWidget(QLabel("Organismos Prioritarios Actuales:"))
+        # --- Barra de Filtro ---
+        filter_layout = QHBoxLayout()
+        filter_layout.addWidget(QLabel("Filtrar Organismo:"))
+        self.org_filter_input = QLineEdit()
+        self.org_filter_input.setPlaceholderText("Escriba nombre de organismo para filtrar...")
+        self.org_filter_input.textChanged.connect(self._on_filter_organismos)
+        filter_layout.addWidget(self.org_filter_input)
+        layout.addLayout(filter_layout)
 
+        # --- Tabla Maestra de Organismos ---
         self.org_table = QTableWidget()
-        self.org_table.setColumnCount(3) # ID (oculto), Organismo, Puntos
-        self.org_table.setHorizontalHeaderLabels(["ID", "Nombre Organismo", "Puntos"])
+        self.org_table.setColumnCount(4)
+        self.org_table.setHorizontalHeaderLabels(["Organismo ID", "Nombre Organismo", "Estado", "Puntos"])
         self.org_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.org_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.org_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.org_table.setColumnHidden(0, True) # Ocultar el ID
-        left_layout.addWidget(self.org_table)
+        self.org_table.setColumnHidden(0, True)
+        self.org_table.setSortingEnabled(True)
+        layout.addWidget(self.org_table)
+        
+        # --- Habilitar Menú Contextual ---
+        self.org_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.org_table.customContextMenuRequested.connect(self._on_organismo_context_menu)
 
-        self.org_delete_button = QPushButton("Eliminar Organismo Seleccionado")
-        self.org_delete_button.clicked.connect(self._on_delete_organismo)
-        left_layout.addWidget(self.org_delete_button)
-
-        # Columna Derecha (Añadir)
-        right_layout = QVBoxLayout()
-        right_layout.addWidget(QLabel("Añadir Organismo Prioritario:"))
-
-        right_layout.addWidget(QLabel("Seleccione Organismo:"))
-        self.org_combo = QComboBox()
-        self.org_combo.setEditable(True) # Permite buscar escribiendo
-        right_layout.addWidget(self.org_combo)
-
-        right_layout.addWidget(QLabel("Puntos (ej. 4):"))
-        self.org_puntos_spin = QSpinBox()
-        self.org_puntos_spin.setRange(0, 100)
-        self.org_puntos_spin.setValue(4)
-        right_layout.addWidget(self.org_puntos_spin)
-
-        self.org_add_button = QPushButton("Añadir Organismo")
-        self.org_add_button.clicked.connect(self._on_add_organismo)
-        right_layout.addWidget(self.org_add_button)
-
-        right_layout.addStretch()
-
-        layout.addLayout(left_layout, 3)
-        layout.addLayout(right_layout, 1)
+        layout.addWidget(QLabel("Haga clic derecho en un organismo para cambiar su estado (Prioritario, No Deseado, No Prioritario)."))
+        
         return widget
 
-    def _load_organismos_table(self):
-        """Recarga la tabla de organismos prioritarios desde la BD."""
+    def _load_organismos_table_master(self):
+        """
+        Carga la tabla maestra con TODOS los organismos y sus reglas.
+        """
+        self.org_table.setSortingEnabled(False) 
         self.org_table.setRowCount(0)
+        self.organismo_data_cache.clear()
+
         try:
-            organismos = self.db_service.get_all_priority_organisms()
-            self.org_table.setRowCount(len(organismos))
-            for row, org in enumerate(organismos):
-                self.org_table.setItem(row, 0, QTableWidgetItem(str(org.org_prio_id)))
-                nombre = org.organismo.nombre if org.organismo else f"ID Desconocido ({org.organismo_id})"
-                self.org_table.setItem(row, 1, QTableWidgetItem(nombre))
-                self.org_table.setItem(row, 2, QTableWidgetItem(str(org.puntos)))
+            all_organisms = self.db_service.get_all_organisms()
+            all_reglas = self.db_service.get_all_organismo_reglas()
+            reglas_map = {regla.organismo_id: regla for regla in all_reglas}
+            self.org_table.setRowCount(len(all_organisms))
+
+            for row, org in enumerate(all_organisms):
+                estado_str = "No Prioritario"
+                puntos_str = "---"
+                puntos_val = None
+                color = COLOR_NEUTRO
+
+                regla = reglas_map.get(org.organismo_id)
+                if regla:
+                    if regla.tipo == TipoReglaOrganismo.PRIORITARIO:
+                        estado_str = "Prioritario"
+                        puntos_str = str(regla.puntos)
+                        puntos_val = regla.puntos
+                        color = COLOR_PRIORITARIO
+                    elif regla.tipo == TipoReglaOrganismo.NO_DESEADO:
+                        estado_str = "No Deseado"
+                        puntos_str = "N/A"
+                        color = COLOR_NO_DESEADO
+
+                item_id = QTableWidgetItem(str(org.organismo_id))
+                item_nombre = QTableWidgetItem(org.nombre)
+                item_estado = QTableWidgetItem(estado_str)
+                item_puntos = QTableWidgetItem(puntos_str)
+                
+                item_id.setData(Qt.ItemDataRole.UserRole, org.organismo_id) 
+                item_estado.setData(Qt.ItemDataRole.UserRole, (estado_str, puntos_val))
+                
+                for item in (item_id, item_nombre, item_estado, item_puntos):
+                    item.setBackground(QBrush(color))
+
+                self.org_table.setItem(row, 0, item_id)
+                self.org_table.setItem(row, 1, item_nombre)
+                self.org_table.setItem(row, 2, item_estado)
+                self.org_table.setItem(row, 3, item_puntos)
+
         except Exception as e:
-            logger.error(f"Error al cargar organismos prioritarios: {e}")
+            logger.error(f"Error al cargar tabla maestra de organismos: {e}", exc_info=True)
             QMessageBox.critical(self, "Error", f"No se pudieron cargar los organismos: {e}")
+        finally:
+            self.org_table.setSortingEnabled(True)
 
-    def _load_organismos_combobox(self):
-        """Carga TODOS los organismos en el ComboBox de selección."""
-        self.org_combo.clear()
-        self.org_combo.addItem("--- Seleccione un organismo ---", None)
-        try:
-            # ¡Esto funciona gracias al volcado masivo que hicimos!
-            organismos = self.db_service.get_all_organisms()
-            for org in organismos:
-                self.org_combo.addItem(org.nombre, org.organismo_id)
-        except Exception as e:
-            logger.error(f"Error al cargar ComboBox de organismos: {e}")
+    @Slot(str)
+    def _on_filter_organismos(self, text: str):
+        """Filtra la tabla de organismos por nombre."""
+        texto_filtro = text.lower().strip()
+        for row in range(self.org_table.rowCount()):
+            nombre_item = self.org_table.item(row, 1) 
+            if nombre_item:
+                nombre = nombre_item.text().lower()
+                self.org_table.setRowHidden(row, texto_filtro not in nombre)
 
-    @Slot()
-    def _on_add_organismo(self):
-        """Se llama al hacer clic en 'Añadir Organismo'."""
-        organismo_id = self.org_combo.currentData()
-        puntos = self.org_puntos_spin.value()
-
-        if organismo_id is None:
-            QMessageBox.warning(self, "Error", "Debe seleccionar un organismo de la lista.")
-            return
-
-        try:
-            self.db_service.add_priority_organism(organismo_id, puntos)
-            self.reglas_han_cambiado = True
-            self._load_organismos_table() # Recargar la tabla
-        except Exception as e:
-            logger.error(f"Error al añadir organismo prioritario: {e}")
-            QMessageBox.critical(self, "Error", f"No se pudo añadir el organismo (¿ya es prioritario?):\n{e}")
-
-    @Slot()
-    def _on_delete_organismo(self):
-        """Se llama al hacer clic en 'Eliminar Organismo'."""
+    @Slot(QTableWidgetItem)
+    def _on_organismo_context_menu(self, pos):
+        """Muestra el menú contextual al hacer clic derecho."""
         selected_items = self.org_table.selectedItems()
         if not selected_items:
-            QMessageBox.warning(self, "Error", "Seleccione una fila para eliminar.")
+            return
+        
+        selected_row = self.org_table.row(selected_items[0])
+        org_id_item = self.org_table.item(selected_row, 0)
+        org_nombre_item = self.org_table.item(selected_row, 1)
+        estado_item = self.org_table.item(selected_row, 2)
+        
+        if not (org_id_item and org_nombre_item and estado_item):
             return
 
-        row = selected_items[0].row()
-        org_prio_id_text = self.org_table.item(row, 0).text()
-        org_prio_id = int(org_prio_id_text)
-        org_texto = self.org_table.item(row, 1).text()
+        organismo_id = int(org_id_item.text())
+        organismo_nombre = org_nombre_item.text()
+        current_estado, current_puntos = estado_item.data(Qt.ItemDataRole.UserRole)
 
-        confirm = QMessageBox.question(
-            self,
-            "Confirmar",
-            f"¿Está seguro de que quiere eliminar '{org_texto}' de la lista de prioritarios?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        menu = QMenu()
+        menu.setWindowTitle(f"Opciones para: {organismo_nombre}")
+
+        action_prioritario = menu.addAction("Mover a 'Prioritario'")
+        action_no_deseado = menu.addAction("Mover a 'No Deseado'")
+        action_no_prioritario = menu.addAction("Mover a 'No Prioritario' (Neutro)")
+
+        if current_estado == "Prioritario":
+            action_prioritario.setEnabled(False)
+        elif current_estado == "No Deseado":
+            action_no_deseado.setEnabled(False)
+        elif current_estado == "No Prioritario":
+            action_no_prioritario.setEnabled(False)
+
+        action_prioritario.triggered.connect(
+            lambda: self._on_set_prioritario(organismo_id, organismo_nombre, current_puntos)
+        )
+        action_no_deseado.triggered.connect(
+            lambda: self._on_set_no_deseado(organismo_id)
+        )
+        action_no_prioritario.triggered.connect(
+            lambda: self._on_set_no_prioritario(organismo_id)
         )
 
-        if confirm == QMessageBox.StandardButton.Yes:
+        menu.exec(self.org_table.viewport().mapToGlobal(pos))
+
+    @Slot()
+    def _on_set_prioritario(self, organismo_id: int, organismo_nombre: str, current_puntos: int | None):
+        """Acción para mover un organismo a 'Prioritario'."""
+        default_puntos = current_puntos if current_puntos is not None else 5
+        
+        # --- ¡CORRECCIÓN! ---
+        # Se cambian los argumentos 'min=1' y 'max=100' (keywords)
+        # por argumentos posicionales (1, 100), que es lo que la
+        # función QInputDialog.getInt espera.
+        puntos, ok = QInputDialog.getInt(
+            self,                                    # parent
+            "Definir Puntos",                        # title
+            f"Ingrese los puntos para:\n'{organismo_nombre}'", # label
+            default_puntos,                          # value (posicional)
+            1,                                       # min (posicional)
+            100                                      # max (posicional)
+        )
+        # --- FIN CORRECCIÓN ---
+        
+        if ok:
             try:
-                self.db_service.delete_priority_organism(org_prio_id)
+                self.db_service.set_organismo_regla(
+                    organismo_id=organismo_id,
+                    tipo=TipoReglaOrganismo.PRIORITARIO,
+                    puntos=puntos
+                )
                 self.reglas_han_cambiado = True
-                self._load_organismos_table() # Recargar la tabla
+                self._load_organismos_table_master() # Recargar la tabla
             except Exception as e:
-                logger.error(f"Error al eliminar organismo prioritario: {e}")
-                QMessageBox.critical(self, "Error", f"No se pudo eliminar el organismo:\n{e}")
+                logger.error(f"Error al mover a Prioritario: {e}")
+                QMessageBox.critical(self, "Error", f"No se pudo guardar la regla:\n{e}")
+
+    @Slot()
+    def _on_set_no_deseado(self, organismo_id: int):
+        """Acción para mover un organismo a 'No Deseado'."""
+        try:
+            self.db_service.set_organismo_regla(
+                organismo_id=organismo_id,
+                tipo=TipoReglaOrganismo.NO_DESEADO,
+                puntos=None
+            )
+            self.reglas_han_cambiado = True
+            self._load_organismos_table_master()
+        except Exception as e:
+            logger.error(f"Error al mover a No Deseado: {e}")
+            QMessageBox.critical(self, "Error", f"No se pudo guardar la regla:\n{e}")
+
+    @Slot()
+    def _on_set_no_prioritario(self, organismo_id: int):
+        """Acción para mover un organismo a 'No Prioritario' (elimina la regla)."""
+        try:
+            self.db_service.delete_organismo_regla(organismo_id)
+            self.reglas_han_cambiado = True
+            self._load_organismos_table_master()
+        except Exception as e:
+            logger.error(f"Error al mover a No Prioritario: {e}")
+            QMessageBox.critical(self, "Error", f"No se pudo eliminar la regla:\n{e}")
+            
+    # --- MÉTODOS ANTIGUOS (YA NO SE USAN) ---
+    # (Están vacíos, no es necesario incluirlos si se borran)

@@ -3,9 +3,11 @@
 Modelos de la Base de Datos (SQLAlchemy ORM).
 
 (Versión 7.0 - Añadida columna para 2do llamado)
+(Versión 7.1 - Implementa CaOrganismoRegla)
 """
 
 import datetime
+import enum  # <-- IMPORTACIÓN NUEVA
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import (
     String,
@@ -16,6 +18,7 @@ from sqlalchemy import (
     JSON,
     ForeignKey,
     Index,
+    Enum,  # <-- IMPORTACIÓN NUEVA
 )
 from typing import Optional, List
 
@@ -144,19 +147,65 @@ class CaKeyword(Base):
         return f"<CaKeyword(keyword='{self.keyword}', tipo='{self.tipo}', puntos={self.puntos})>"
 
 
-class CaOrganismoPrioritario(Base):
-    __tablename__ = "ca_organismo_prioritario"
+# --- CÓDIGO ANTIGUO COMENTADO ---
+# class CaOrganismoPrioritario(Base):
+#     __tablename__ = "ca_organismo_prioritario"
     
-    org_prio_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+#     org_prio_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    
+#     organismo_id: Mapped[int] = mapped_column(
+#         ForeignKey("ca_organismo.organismo_id", ondelete="CASCADE"),
+#         unique=True
+#     )
+    
+#     puntos: Mapped[int] = mapped_column(Integer)
+    
+#     organismo: Mapped["CaOrganismo"] = relationship(lazy="joined")
+
+#     def __repr__(self):
+#         return f"<CaOrganismoPrioritario(org_id={self.organismo_id}, puntos={self.puntos})>"
+
+
+# --- CÓDIGO NUEVO ---
+
+class TipoReglaOrganismo(enum.Enum):
+    """Define los tipos de reglas para un organismo."""
+    PRIORITARIO = 'prioritario'
+    NO_DESEADO = 'no_deseado'
+
+
+class CaOrganismoRegla(Base):
+    """
+    Almacena las reglas de puntuación para un organismo.
+    Un organismo puede ser Prioritario (suma puntos) o No Deseado (resta o filtra).
+    Si un organismo no está en esta tabla, es 'No Prioritario'.
+    """
+    __tablename__ = "ca_organismo_regla"
+    
+    regla_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     
     organismo_id: Mapped[int] = mapped_column(
         ForeignKey("ca_organismo.organismo_id", ondelete="CASCADE"),
-        unique=True
+        unique=True, # Un organismo solo puede tener una regla
+        index=True
     )
     
-    puntos: Mapped[int] = mapped_column(Integer)
+    # Define si es 'prioritario' o 'no_deseado'
+    tipo: Mapped[TipoReglaOrganismo] = mapped_column(
+        Enum(TipoReglaOrganismo, name='tipo_regla_organismo_enum', native_enum=False), 
+        nullable=False,
+        index=True
+    )
     
+    # Los puntos solo aplican a 'prioritario'.
+    # Será NULL para 'no_deseado'.
+    puntos: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    
+    # Relación para fácil acceso al nombre del organismo
     organismo: Mapped["CaOrganismo"] = relationship(lazy="joined")
 
     def __repr__(self):
-        return f"<CaOrganismoPrioritario(org_id={self.organismo_id}, puntos={self.puntos})>"
+        return (
+            f"<CaOrganismoRegla(org_id={self.organismo_id}, "
+            f"tipo='{self.tipo.value}', puntos={self.puntos})>"
+        )

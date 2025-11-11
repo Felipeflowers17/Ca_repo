@@ -2,10 +2,10 @@
 """
 Servicio de Base de Datos (DbService).
 
-(Versión 7.0 - Guarda fecha_cierre_segundo_llamado)
+(Versión 7.1 - Usa CaOrganismoRegla)
 """
 
-from typing import List, Dict, Callable, Tuple
+from typing import List, Dict, Callable, Tuple, Optional
 from sqlalchemy.orm import sessionmaker, Session, joinedload
 from sqlalchemy import select, join
 
@@ -16,7 +16,9 @@ from .db_models import (
     CaOrganismo,
     CaSector,
     CaKeyword,
-    CaOrganismoPrioritario,
+    # CaOrganismoPrioritario, # <-- Modelo Antiguo
+    CaOrganismoRegla,      # <-- Modelo Nuevo
+    TipoReglaOrganismo,  # <-- Enum Nuevo
 )
 
 from config.config import UMBRAL_FASE_1, UMBRAL_FINAL_RELEVANTE
@@ -31,6 +33,8 @@ class DbService:
         logger.info("DbService inicializado.")
 
     # --- 1. Métodos de Lógica ELT (Usados por EtlService) ---
+    
+    # ... (Esta sección no necesita cambios) ...
 
     def _get_or_create_organismo_sector(
         self, session: Session, nombre_organismo: str, nombre_sector: str
@@ -173,7 +177,7 @@ class DbService:
     def actualizar_ca_con_fase_2(
         self, codigo_ca: str, datos_fase_2: Dict, puntuacion_total: int
     ):
-        """Actualiza una CA específica con los datos de Fase 2."""
+        # ... (Sin cambios) ...
         with self.session_factory() as session:
             try:
                 stmt = select(CaLicitacion).where(CaLicitacion.codigo_ca == codigo_ca)
@@ -188,9 +192,7 @@ class DbService:
                 licitacion.direccion_entrega = datos_fase_2.get("direccion_entrega")
                 licitacion.puntuacion_final = puntuacion_total
                 
-                # --- ¡NUEVO CAMBIO! (Tu Punto 3) ---
                 licitacion.fecha_cierre_segundo_llamado = datos_fase_2.get("fecha_cierre_p2")
-                # --- FIN NUEVO CAMBIO ---
                 
                 session.commit()
                 logger.debug(f"[Fase 2] CA {codigo_ca} actualizada. Score: {puntuacion_total}")
@@ -201,8 +203,8 @@ class DbService:
 
     # --- 2. Métodos de Lectura para la GUI (Refresco de Pestañas) ---
 
+    # ... (Esta sección no necesita cambios) ...
     def obtener_datos_tab1_candidatas(self) -> List[CaLicitacion]:
-        # ... (Sin cambios) ...
         logger.debug(f"GUI: Obteniendo datos Pestaña 1 (Score >= {UMBRAL_FASE_1})")
         with self.session_factory() as session:
             stmt = (
@@ -217,7 +219,6 @@ class DbService:
             return session.scalars(stmt).all()
 
     def obtener_datos_tab2_relevantes(self) -> List[CaLicitacion]:
-        # ... (Sin cambios) ...
         logger.debug(f"GUI: Obteniendo datos Pestaña 2 (Score >= {UMBRAL_FINAL_RELEVANTE})")
         with self.session_factory() as session:
             stmt = (
@@ -232,7 +233,6 @@ class DbService:
             return session.scalars(stmt).all()
 
     def obtener_datos_tab3_seguimiento(self) -> List[CaLicitacion]:
-        # ... (Sin cambios) ...
         logger.debug("GUI: Obteniendo datos Pestaña 3 (Favoritos)")
         with self.session_factory() as session:
             stmt = (
@@ -248,7 +248,6 @@ class DbService:
             return session.scalars(stmt).all()
 
     def obtener_datos_tab4_ofertadas(self) -> List[CaLicitacion]:
-        # ... (Sin cambios) ...
         logger.debug("GUI: Obteniendo datos Pestaña 4 (Ofertadas)")
         with self.session_factory() as session:
             stmt = (
@@ -265,8 +264,8 @@ class DbService:
 
     # --- 3. Métodos de Acción para la GUI (Menú Contextual) ---
 
+    # ... (Esta sección no necesita cambios) ...
     def _gestionar_seguimiento(self, ca_id: int, es_favorito: bool | None, es_ofertada: bool | None):
-        # ... (Sin cambios) ...
         with self.session_factory() as session:
             try:
                 seguimiento = session.get(CaSeguimiento, ca_id)
@@ -291,15 +290,12 @@ class DbService:
                 raise
 
     def gestionar_favorito(self, ca_id: int, es_favorito: bool):
-        # ... (Sin cambios) ...
         self._gestionar_seguimiento(ca_id, es_favorito=es_favorito, es_ofertada=None)
 
     def gestionar_ofertada(self, ca_id: int, es_ofertada: bool):
-        # ... (Sin cambios) ...
         self._gestionar_seguimiento(ca_id, es_favorito=None, es_ofertada=es_ofertada)
 
     def eliminar_ca_definitivamente(self, ca_id: int):
-        # ... (Sin cambios) ...
         logger.debug(f"GUI: Eliminación definitiva de CA ID: {ca_id}")
         with self.session_factory() as session:
             try:
@@ -316,7 +312,8 @@ class DbService:
                 raise
 
     # --- 4. Métodos de Gestión de Reglas (para la GUI de Configuración) ---
-    # ... (Sin cambios en todos estos métodos) ...
+    
+    # ... (Gestión de Keywords no cambia) ...
     def get_all_keywords(self) -> List[CaKeyword]:
         with self.session_factory() as session:
             return session.scalars(select(CaKeyword).order_by(CaKeyword.tipo, CaKeyword.keyword)).all()
@@ -352,42 +349,85 @@ class DbService:
                 session.rollback()
                 raise e
     
-    def get_all_priority_organisms(self) -> List[CaOrganismoPrioritario]:
+    # --- MÉTODOS DE ORGANISMO (ACTUALIZADOS) ---
+
+    def get_all_organismo_reglas(self) -> List[CaOrganismoRegla]:
+        """Obtiene todas las reglas de organismo (Prioritarias y No Deseadas)."""
         with self.session_factory() as session:
-            stmt = select(CaOrganismoPrioritario).options(joinedload(CaOrganismoPrioritario.organismo))
+            stmt = select(CaOrganismoRegla).options(
+                joinedload(CaOrganismoRegla.organismo)
+            )
             return session.scalars(stmt).all()
 
-    def add_priority_organism(self, organismo_id: int, puntos: int) -> CaOrganismoPrioritario:
+    def set_organismo_regla(
+        self, organismo_id: int, tipo: TipoReglaOrganismo, puntos: Optional[int] = None
+    ) -> CaOrganismoRegla:
+        """
+        Crea o actualiza una regla para un organismo (Upsert).
+        Esto se usa para mover un organismo a 'Prioritario' o 'No Deseado'.
+        """
+        # Validación de lógica de negocio
+        if tipo == TipoReglaOrganismo.NO_DESEADO:
+            puntos = None  # Nos aseguramos que 'no deseado' no tenga puntos
+        elif tipo == TipoReglaOrganismo.PRIORITARIO and puntos is None:
+            logger.error(f"Intento de crear regla prioritaria SIN puntos para org {organismo_id}")
+            raise ValueError("Reglas 'Prioritario' deben tener un valor de puntos.")
+
         with self.session_factory() as session:
             try:
-                nuevo_prio = CaOrganismoPrioritario(
-                    organismo_id=organismo_id, puntos=puntos
+                # Buscar si ya existe una regla para este organismo
+                stmt = select(CaOrganismoRegla).where(
+                    CaOrganismoRegla.organismo_id == organismo_id
                 )
-                session.add(nuevo_prio)
+                regla = session.scalars(stmt).first()
+
+                if regla:
+                    # Actualizar regla existente
+                    regla.tipo = tipo
+                    regla.puntos = puntos
+                    logger.info(f"Regla actualizada para organismo ID {organismo_id} a {tipo.value}.")
+                else:
+                    # Crear nueva regla
+                    regla = CaOrganismoRegla(
+                        organismo_id=organismo_id, tipo=tipo, puntos=puntos
+                    )
+                    session.add(regla)
+                    logger.info(f"Nueva regla creada para organismo ID {organismo_id}: {tipo.value}.")
+                
                 session.commit()
-                logger.info(f"Organismo Prioritario añadido: (ID: {organismo_id})")
-                session.refresh(nuevo_prio)
-                return nuevo_prio
+                session.refresh(regla)
+                return regla
+            
             except Exception as e:
-                logger.error(f"Error al añadir organismo prioritario ID {organismo_id}: {e}")
+                logger.error(f"Error en set_organismo_regla para ID {organismo_id}: {e}")
                 session.rollback()
                 raise e
 
-    def delete_priority_organism(self, org_prio_id: int):
+    def delete_organismo_regla(self, organismo_id: int):
+        """
+        Elimina una regla de organismo (por organismo_id).
+        Esto se usa para mover un organismo a 'No Prioritario' (estado por defecto).
+        """
         with self.session_factory() as session:
             try:
-                prio = session.get(CaOrganismoPrioritario, org_prio_id)
-                if prio:
-                    session.delete(prio)
+                # Buscar la regla por organismo_id
+                stmt = select(CaOrganismoRegla).where(
+                    CaOrganismoRegla.organismo_id == organismo_id
+                )
+                regla = session.scalars(stmt).first()
+                
+                if regla:
+                    session.delete(regla)
                     session.commit()
-                    logger.info(f"Organismo Prioritario eliminado: (ID: {org_prio_id})")
+                    logger.info(f"Regla eliminada para organismo ID {organismo_id}.")
                 else:
-                    logger.warning(f"No se encontró org. prioritario ID {org_prio_id} para eliminar.")
+                    logger.warning(f"No se encontró regla para organismo ID {organismo_id} (no se pudo eliminar).")
             except Exception as e:
-                logger.error(f"Error al eliminar org. prioritario ID {org_prio_id}: {e}")
+                logger.error(f"Error al eliminar regla para organismo ID {organismo_id}: {e}")
                 session.rollback()
                 raise e
     
     def get_all_organisms(self) -> List[CaOrganismo]:
+        """Obtiene TODOS los organismos de la BD (para la GUI de Configuración)."""
         with self.session_factory() as session:
             return session.scalars(select(CaOrganismo).order_by(CaOrganismo.nombre)).all()
