@@ -2,9 +2,8 @@
 """
 Ventana Principal de la Aplicación (MainWindow).
 
-Versión (Fase 7.8 - Eliminación de Iconos)
-- Se eliminan todas las importaciones y llamadas a QIcon/FluentIcon
-  para garantizar que la aplicación se inicie sin errores.
+Versión (Fase 7.9 - Añadida Acción de Actualizar Fichas)
+- Añadida la QAction 'action_update_fichas' al menú 'Acciones'.
 """
 
 import sys
@@ -16,12 +15,7 @@ from PySide6.QtWidgets import (
     QMenu
 )
 from PySide6.QtCore import QThreadPool
-# --- ¡CAMBIO! ---
-# QIcon eliminado, QStandardItemModel movido a QtGui
 from PySide6.QtGui import QAction, QStandardItemModel
-# --- FIN CAMBIO ---
-
-# --- Importación de Iconos ELIMINADA ---
 
 # Importaciones de Lógica de Negocio (Servicios)
 from src.gui.gui_worker import Worker
@@ -86,6 +80,10 @@ class MainWindow(
         self.refresh_button: QPushButton | None = None
         self.actions_menu_button: QPushButton | None = None
         
+        # --- ¡NUEVA ACCIÓN DECLARADA! ---
+        self.action_update_fichas: QAction | None = None
+        # --- FIN ---
+        
         self.table_tab1: QTableView | None = None
         self.table_tab2: QTableView | None = None
         self.table_tab3: QTableView | None = None
@@ -113,25 +111,28 @@ class MainWindow(
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # --- Panel de Botones (Rediseñado y SIN Iconos) ---
+        # --- Panel de Botones ---
         button_layout = QHBoxLayout()
 
         self.refresh_button = QPushButton("Refrescar Datos")
-        # .setIcon() ELIMINADO
         self.refresh_button.setFixedHeight(40)
         button_layout.addWidget(self.refresh_button)
 
         button_layout.addStretch()
 
-        self.actions_menu_button = QPushButton("Acciones ▾") # Texto cambiado
-        # .setIcon() ELIMINADO
+        self.actions_menu_button = QPushButton("Acciones ▾")
         self.actions_menu_button.setFixedHeight(40)
         
-        # --- Lógica del Menú de Acciones (SIN Iconos) ---
+        # --- Lógica del Menú de Acciones ---
         self.actions_menu = QMenu(self)
         
         self.action_scrape = QAction("Iniciar Nuevo Scraping...", self)
         self.actions_menu.addAction(self.action_scrape)
+        
+        # --- ¡NUEVA ACCIÓN AÑADIDA AL MENÚ! ---
+        self.action_update_fichas = QAction("Actualizar Fichas (Tabs 2-4)", self)
+        self.actions_menu.addAction(self.action_update_fichas)
+        # --- FIN ---
         
         self.action_export = QAction("Exportar Reporte Excel", self)
         self.actions_menu.addAction(self.action_export)
@@ -153,7 +154,7 @@ class MainWindow(
 
         button_layout.addWidget(self.actions_menu_button)
         main_layout.addLayout(button_layout)
-        # --- Fin Panel de Botones (Rediseñado) ---
+        # --- Fin Panel de Botones ---
 
         # --- Sistema de Pestañas (QTabWidget) ---
         self.tabs = QTabWidget()
@@ -190,6 +191,11 @@ class MainWindow(
         
         # Acciones del Menú
         self.action_scrape.triggered.connect(self.on_open_scraping_dialog)
+        
+        # --- ¡NUEVA CONEXIÓN AÑADIDA! ---
+        self.action_update_fichas.triggered.connect(self.on_run_fase2_update_thread)
+        # --- FIN ---
+        
         self.action_export.triggered.connect(self.on_exportar_excel_thread)
         self.action_open_settings.triggered.connect(self.on_open_settings_dialog)
         self.action_recalculate.triggered.connect(self.on_run_recalculate_thread)

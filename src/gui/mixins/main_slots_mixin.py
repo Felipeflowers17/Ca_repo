@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 Mixin para los Slots (acciones) de los botones principales.
-(v6.2 - Quitado QObject de la herencia para evitar error de init doble)
+(v6.3 - Añadido slot para actualizar fichas de Fase 2)
 """
 
 from PySide6.QtWidgets import QMessageBox
-# QObject quitado de esta línea
 from PySide6.QtCore import Slot 
 
 from src.gui.gui_scraping_dialog import ScrapingDialog
@@ -15,7 +14,6 @@ from src.utils.logger import configurar_logger
 logger = configurar_logger(__name__)
 
 
-# La clase ya NO hereda de QObject
 class MainSlotsMixin:
     """
     Este Mixin maneja las acciones disparadas por los
@@ -150,5 +148,50 @@ class MainSlotsMixin:
             logger.warning("Proceso de Recálculo finalizado con errores.")
         else:
             QMessageBox.information(self, "Proceso Completado", "Se han recalculado todos los puntajes.")
+        # Refresca los datos en todas las pestañas
+        self.on_load_data_thread()
+
+    # ---
+    # --- ¡NUEVOS MÉTODOS PARA LA MEJORA 3! ---
+    # ---
+    @Slot()
+    def on_run_fase2_update_thread(self):
+        """
+        Inicia el hilo de actualización de fichas (Fase 2) para
+        las pestañas 2, 3 y 4.
+        """
+        if self.is_task_running:
+            return
+        
+        confirm = QMessageBox.question(
+            self, "Confirmar Actualización de Fichas",
+            "Esto buscará en la web las fichas de todas las CAs en las pestañas "
+            "'Relevantes', 'Seguimiento' y 'Ofertadas' para actualizar sus datos (descripción, productos) y puntajes.\n\n"
+            "Esta operación puede tardar varios minutos.\n"
+            "¿Desea continuar?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+
+        if confirm == QMessageBox.StandardButton.No:
+            return
+
+        logger.info("Iniciando actualización de Fichas Fase 2 (con hilo)...")
+        self.start_task(
+            task=self.etl_service.run_fase2_update,
+            on_result=lambda: logger.info("Actualización de Fichas completada OK"),
+            on_error=self.on_task_error,
+            on_finished=self.on_fase2_update_finished,
+            on_progress=self.on_progress_update,
+        )
+
+    @Slot()
+    def on_fase2_update_finished(self):
+        """Se llama al finalizar el hilo de actualización de fichas."""
+        self.set_ui_busy(False)
+        if self.last_error:
+            logger.warning("Proceso de Actualización de Fichas finalizado con errores.")
+        else:
+            QMessageBox.information(self, "Proceso Completado", "Se han actualizado las fichas seleccionadas.")
         # Refresca los datos en todas las pestañas
         self.on_load_data_thread()

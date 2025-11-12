@@ -2,18 +2,18 @@ import time
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, TYPE_CHECKING
-from playwright.sync_api import sync_playwright
+from typing import Callable, TYPE_CHECKING, Dict
+from playwright.sync_api import sync_playwright # <-- ESTA LÍNEA (Línea 6)
 
 if TYPE_CHECKING:
     from src.db.db_service import DbService
     from src.scraper.scraper_service import ScraperService
     from src.logic.score_engine import ScoreEngine
+    from src.db.db_models import CaLicitacion
 
 from config.config import MODO_HEADLESS, HEADERS_API
 from src.utils.logger import configurar_logger
 
-# --- ¡NUEVO! ---
 # Importamos nuestras excepciones personalizadas
 from src.utils.exceptions import (
     ScrapingFase1Error,
@@ -22,7 +22,6 @@ from src.utils.exceptions import (
     ScrapingFase2Error,
     RecalculoError
 )
-# --- FIN NUEVO ---
 
 logger = configurar_logger(__name__)
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -49,8 +48,6 @@ class EtlService:
     def _transform_puntajes_fase_1(self, progress_callback: Callable[[str], None]):
         logger.info("Iniciando (Transform) Fase 1...")
         
-        # --- ¡CAMBIO! ---
-        # Envolvemos la lógica en un try/except
         try:
             licitaciones_a_puntuar = (
                 self.db_service.obtener_candidatas_para_recalculo_fase_1()
@@ -79,9 +76,7 @@ class EtlService:
 
         except Exception as e:
             logger.error(f"Error en (Transform) Fase 1: {e}", exc_info=True)
-            # Lanzamos nuestra excepción personalizada
             raise DatabaseTransformError(f"Error al calcular puntajes (Transform): {e}") from e
-        # --- FIN CAMBIO ---
 
     def run_etl_live_to_db(
         self,
@@ -96,7 +91,6 @@ class EtlService:
         progress_callback("Iniciando Fase 1 (Listado - Extract)...")
 
         # --- 1. EXTRACT (Fase 1) ---
-        # --- ¡CAMBIO! ---
         try:
             filtros_fase_1 = {
                 'date_from': date_from.strftime('%Y-%m-%d'),
@@ -109,7 +103,6 @@ class EtlService:
             logger.critical(f"ETL (a BD) falló en (Extract): {e}")
             progress_callback(f"Error Crítico en Fase 1: {e}")
             raise ScrapingFase1Error(f"Fallo el scraping de listado (Fase 1): {e}") from e
-        # --- FIN CAMBIO ---
 
         if not datos_crudos:
             logger.info("Fase 1 (Extract) no retornó datos. Terminando.")
@@ -117,7 +110,6 @@ class EtlService:
             return
 
         # --- 2. LOAD (Fase 1) ---
-        # --- ¡CAMBIO! ---
         try:
             progress_callback(f"Cargando {len(datos_crudos)} CAs crudas a la BD...")
             self.db_service.insertar_o_actualizar_licitaciones_raw(datos_crudos)
@@ -125,10 +117,8 @@ class EtlService:
             logger.critical(f"ETL (a BD) falló en (Load): {e}")
             progress_callback(f"Error Crítico al cargar en BD: {e}")
             raise DatabaseLoadError(f"Fallo al guardar en BD (Load): {e}") from e
-        # --- FIN CAMBIO ---
             
         # --- 3. TRANSFORM (Fase 1) ---
-        # (Ya tiene su propio try/except dentro de la función)
         self._transform_puntajes_fase_1(progress_callback)
 
 
@@ -139,7 +129,6 @@ class EtlService:
         except Exception as e:
             logger.error(f"Error al obtener candidatas de la BD: {e}")
             progress_callback(f"Error de BD: {e}")
-            # Usamos un error genérico aquí, ya que no es un fallo crítico del ETL
             raise e
 
         if not candidatas:
@@ -151,8 +140,8 @@ class EtlService:
         logger.info(f"Iniciando Fase 2 para {len(candidatas)} CAs.")
         progress_callback(f"Iniciando Fase 2. {len(candidatas)} CAs por procesar...")
         
-        # --- ¡CAMBIO! ---
         try:
+            # Esta función (sync_playwright) se importa en la línea 6
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=MODO_HEADLESS, slow_mo=500)
                 context = browser.new_context(
@@ -196,7 +185,6 @@ class EtlService:
             raise ScrapingFase2Error(f"Fallo el scraping de fichas (Fase 2): {e}") from e
         finally:
             logger.info(f"Resumen Fase 2: {exitosas}/{total} procesadas.")
-        # --- FIN CAMBIO ---
 
         progress_callback("Proceso ETL (a BD) Completo.")
         logger.info("Proceso ETL (a BD) Completo.")
@@ -206,8 +194,6 @@ class EtlService:
         progress_callback: Callable[[str], None],
         config: dict,
     ):
-        # ... (Este método no necesita cambios, pero
-        # por consistencia también le ponemos el try/except)
         
         date_from = config["date_from"]
         date_to = config["date_to"]
@@ -243,7 +229,6 @@ class EtlService:
     ):
         logger.info("--- INICIANDO RECALCULO TOTAL DE PUNTAJES ---")
         
-        # --- ¡CAMBIO! ---
         try:
             progress_callback("Recargando reglas desde la BD...")
             self.score_engine.recargar_reglas()
@@ -290,4 +275,102 @@ class EtlService:
             logger.error(f"Error en el Recálculo Total: {e}", exc_info=True)
             progress_callback(f"Error en recálculo: {e}")
             raise RecalculoError(f"Fallo el proceso de recálculo: {e}") from e
-        # --- FIN CAMBIO ---
+
+    # ---
+    # --- ¡NUEVO MÉTODO PARA LA MEJORA 3! ---
+    # ---
+    def run_fase2_update(
+        self, 
+        progress_callback: Callable[[str], None]
+    ):
+        """
+        Actualiza las fichas (Fase 2) de todas las CAs en las pestañas
+        Relevantes, Seguimiento y Ofertadas.
+        """
+        logger.info("--- INICIANDO ACTUALIZACIÓN DE FICHAS (FASE 2) ---")
+        
+        try:
+            progress_callback("Obteniendo CAs de pestañas 2, 3 y 4...")
+            
+            # 1. Obtener CAs de las 3 pestañas
+            cas_tab2 = self.db_service.obtener_datos_tab2_relevantes()
+            cas_tab3 = self.db_service.obtener_datos_tab3_seguimiento()
+            cas_tab4 = self.db_service.obtener_datos_tab4_ofertadas()
+
+            # 2. Consolidar y deduplicar usando un diccionario
+            cas_a_procesar_map: Dict[int, "CaLicitacion"] = {}
+            for cas_list in (cas_tab2, cas_tab3, cas_tab4):
+                for ca in cas_list:
+                    cas_a_procesar_map[ca.ca_id] = ca
+            
+            cas_a_procesar = list(cas_a_procesar_map.values())
+            total = len(cas_a_procesar)
+
+            if not cas_a_procesar:
+                logger.info("No se encontraron CAs para actualizar.")
+                progress_callback("No hay CAs para actualizar.")
+                return
+
+            logger.info(f"Se actualizarán {total} CAs.")
+            progress_callback(f"Iniciando Fase 2. {total} CAs por procesar...")
+
+            # 3. Bucle de Scraping (Lógica reutilizada de run_etl_live_to_db)
+            # Esta función (sync_playwright) se importa en la línea 6
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=MODO_HEADLESS, slow_mo=500)
+                context = browser.new_context(
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit(537.36',
+                    viewport={'width': 1920, 'height': 1080},
+                    locale='es-CL'
+                )
+                page = context.new_page()
+                page.set_extra_http_headers(HEADERS_API)
+                
+                exitosas = 0
+                for i, licitacion in enumerate(cas_a_procesar):
+                    codigo_ca = licitacion.codigo_ca
+                    
+                    item_raw = {
+                        'nombre': licitacion.nombre,
+                        'estado_ca_texto': licitacion.estado_ca_texto,
+                        'organismo_comprador': licitacion.organismo.nombre if licitacion.organismo else ""
+                    }
+                    puntos_fase_1 = self.score_engine.calcular_puntuacion_fase_1(item_raw)
+                    
+                    if puntos_fase_1 < 0:
+                        logger.warning(f"Omitiendo actualización Fase 2 de {codigo_ca}, puntaje Fase 1 es negativo ({puntos_fase_1}).")
+                        continue
+                        
+                    progress_callback(f"({i+1}/{total}) Actualizando: {codigo_ca}...")
+                    logger.info(f"--- [Actualización Fase 2] Procesando {i+1}/{total}: {codigo_ca} ---")
+                    
+                    datos_ficha = self.scraper_service.scrape_ficha_detalle_api(
+                        page, codigo_ca, progress_callback
+                    )
+                    
+                    if datos_ficha is None:
+                        logger.error(f"No se pudieron obtener datos de Fase 2 para {codigo_ca}.")
+                        continue
+                    
+                    puntos_fase_2 = self.score_engine.calcular_puntuacion_fase_2(datos_ficha)
+                    puntuacion_total = puntos_fase_1 + puntos_fase_2
+                    
+                    self.db_service.actualizar_ca_con_fase_2(
+                        codigo_ca, datos_ficha, puntuacion_total
+                    )
+                    
+                    exitosas += 1
+                    time.sleep(1)
+                
+                context.close()
+                browser.close()
+
+        except Exception as e:
+            logger.critical(f"Fallo en el bucle de actualización Fase 2: {e}", exc_info=True)
+            progress_callback(f"Error Crítico en Fase 2: {e}")
+            raise ScrapingFase2Error(f"Fallo el scraping de actualización de fichas: {e}") from e
+        finally:
+            logger.info(f"Resumen Actualización Fase 2: {exitosas}/{total} procesadas.")
+        
+        progress_callback("¡Actualización de fichas completada!")
+        logger.info("--- ACTUALIZACIÓN DE FICHAS (FASE 2) COMPLETADA ---")
