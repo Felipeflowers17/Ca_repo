@@ -2,8 +2,8 @@
 """
 Ventana Principal de la Aplicación (MainWindow).
 
-Versión (Fase 7.9 - Añadida Acción de Actualizar Fichas)
-- Añadida la QAction 'action_update_fichas' al menú 'Acciones'.
+Versión (Fase 8.1 - Piloto Automático Corregido)
+- Corregida la importación de 'db.db_service' a 'src.db.db_service'.
 """
 
 import sys
@@ -12,16 +12,23 @@ from typing import List
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QPushButton, QStatusBar, QTableView, QLineEdit,
-    QMenu
+    QMenu, QMessageBox
 )
-from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import QThreadPool, QTimer
 from PySide6.QtGui import QAction, QStandardItemModel
 
 # Importaciones de Lógica de Negocio (Servicios)
 from src.gui.gui_worker import Worker
 from src.utils.logger import configurar_logger
+from src.utils.settings_manager import SettingsManager
 from src.db.session import SessionLocal
-from src.db.db_service import DbService
+
+# ---
+# --- ¡LÍNEA CORREGIDA! ---
+# ---
+from src.db.db_service import DbService # <-- Antes decía 'from db.db_service...'
+# ---
+# ---
 from src.logic.etl_service import EtlService
 from src.logic.excel_service import ExcelService
 from src.logic.score_engine import ScoreEngine
@@ -59,6 +66,8 @@ class MainWindow(
         self.last_export_path: str | None = None
 
         try:
+            self.settings_manager = SettingsManager()
+            
             self.db_service = DbService(SessionLocal)
             self.scraper_service = ScraperService()
             self.excel_service = ExcelService(self.db_service)
@@ -68,7 +77,6 @@ class MainWindow(
             )
         except Exception as e:
             logger.critical(f"Error al inicializar los servicios: {e}")
-            from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(
                 self, "Error Crítico de Inicialización",
                 f"No se pudieron iniciar los servicios de la aplicación.\n"
@@ -79,31 +87,32 @@ class MainWindow(
         # --- Declaraciones de atributos (para el type-checker) ---
         self.refresh_button: QPushButton | None = None
         self.actions_menu_button: QPushButton | None = None
-        
-        # --- ¡NUEVA ACCIÓN DECLARADA! ---
         self.action_update_fichas: QAction | None = None
-        # --- FIN ---
-        
         self.table_tab1: QTableView | None = None
         self.table_tab2: QTableView | None = None
         self.table_tab3: QTableView | None = None
         self.table_tab4: QTableView | None = None
-        
         self.model_tab1: QStandardItemModel | None = None
         self.model_tab2: QStandardItemModel | None = None
         self.model_tab3: QStandardItemModel | None = None
         self.model_tab4: QStandardItemModel | None = None
-        
         self.search_tab1: QLineEdit | None = None
         self.search_tab2: QLineEdit | None = None
         self.search_tab3: QLineEdit | None = None
         self.search_tab4: QLineEdit | None = None
 
+        # --- Declaración de Timers ---
+        self.timer_fase1: QTimer | None = None
+        self.timer_fase2: QTimer | None = None
+        
         self._setup_ui()
         self._connect_signals()
+        
+        # --- Iniciar timers después de conectar señales ---
+        self._setup_timers()
 
         logger.info("Ventana principal (GUI) inicializada.")
-        self.on_load_data_thread()
+        self.on_load_data_thread() # Carga inicial de datos
 
     def _setup_ui(self):
         """Crea todos los widgets de la interfaz."""
@@ -123,16 +132,13 @@ class MainWindow(
         self.actions_menu_button = QPushButton("Acciones ▾")
         self.actions_menu_button.setFixedHeight(40)
         
-        # --- Lógica del Menú de Acciones ---
         self.actions_menu = QMenu(self)
         
         self.action_scrape = QAction("Iniciar Nuevo Scraping...", self)
         self.actions_menu.addAction(self.action_scrape)
         
-        # --- ¡NUEVA ACCIÓN AÑADIDA AL MENÚ! ---
         self.action_update_fichas = QAction("Actualizar Fichas (Tabs 2-4)", self)
         self.actions_menu.addAction(self.action_update_fichas)
-        # --- FIN ---
         
         self.action_export = QAction("Exportar Reporte Excel", self)
         self.actions_menu.addAction(self.action_export)
@@ -141,7 +147,7 @@ class MainWindow(
 
         self.config_submenu = QMenu("Configuración", self)
         
-        self.action_open_settings = QAction("Keywords y Puntos...", self)
+        self.action_open_settings = QAction("Configuración y Automatización...", self)
         self.config_submenu.addAction(self.action_open_settings)
         
         self.action_recalculate = QAction("Recalcular Puntajes", self)
@@ -150,7 +156,6 @@ class MainWindow(
         self.actions_menu.addMenu(self.config_submenu)
         
         self.actions_menu_button.setMenu(self.actions_menu)
-        # --- Fin Lógica Menú ---
 
         button_layout.addWidget(self.actions_menu_button)
         main_layout.addLayout(button_layout)
@@ -186,16 +191,11 @@ class MainWindow(
     def _connect_signals(self):
         """Conecta todas las señales de la GUI a sus slots."""
         
-        # Botón de refresco
         self.refresh_button.clicked.connect(self.on_load_data_thread)
         
         # Acciones del Menú
         self.action_scrape.triggered.connect(self.on_open_scraping_dialog)
-        
-        # --- ¡NUEVA CONEXIÓN AÑADIDA! ---
         self.action_update_fichas.triggered.connect(self.on_run_fase2_update_thread)
-        # --- FIN ---
-        
         self.action_export.triggered.connect(self.on_exportar_excel_thread)
         self.action_open_settings.triggered.connect(self.on_open_settings_dialog)
         self.action_recalculate.triggered.connect(self.on_run_recalculate_thread)
@@ -212,6 +212,49 @@ class MainWindow(
         self.table_tab3.customContextMenuRequested.connect(self.mostrar_menu_contextual)
         self.table_tab4.customContextMenuRequested.connect(self.mostrar_menu_contextual)
     
+    def _setup_timers(self):
+        """Configura e inicia los QTimers para tareas automáticas."""
+        logger.info("Configurando timers de automatización...")
+        
+        # --- Timer 1: Búsqueda de Nuevas CAs (Fase 1) ---
+        self.timer_fase1 = QTimer(self)
+        self.timer_fase1.timeout.connect(self.on_start_full_scraping_auto)
+        
+        # --- Timer 2: Actualización de CAs (Fase 2) ---
+        self.timer_fase2 = QTimer(self)
+        self.timer_fase2.timeout.connect(self.on_run_fase2_update_thread_auto)
+
+        # Cargar la configuración e iniciar/detener los timers
+        self.reload_timers_config()
+
+    def reload_timers_config(self):
+        """Lee la config y (re)inicia los timers. Se llama al inicio y al cambiar settings."""
+        try:
+            # Recargar la configuración del archivo
+            self.settings_manager.load_settings()
+            
+            # Configurar Timer 1 (Fase 1)
+            intervalo_f1_horas = self.settings_manager.get_setting("auto_fase1_intervalo_horas")
+            if intervalo_f1_horas > 0:
+                intervalo_ms = intervalo_f1_horas * 60 * 60 * 1000 # horas a ms
+                self.timer_fase1.start(intervalo_ms)
+                logger.info(f"Timer (Fase 1) iniciado. Se ejecutará cada {intervalo_f1_horas} horas.")
+            else:
+                self.timer_fase1.stop()
+                logger.info("Timer (Fase 1) detenido (intervalo 0).")
+
+            # Configurar Timer 2 (Fase 2)
+            intervalo_f2_min = self.settings_manager.get_setting("auto_fase2_intervalo_minutos")
+            if intervalo_f2_min > 0:
+                intervalo_ms = intervalo_f2_min * 60 * 1000 # minutos a ms
+                self.timer_fase2.start(intervalo_ms)
+                logger.info(f"Timer (Fase 2) iniciado. Se ejecutará cada {intervalo_f2_min} minutos.")
+            else:
+                self.timer_fase2.stop()
+                logger.info("Timer (Fase 2) detenido (intervalo 0).")
+
+        except Exception as e:
+            logger.error(f"Error al configurar o (re)iniciar timers: {e}")
 
 # --- PUNTO DE ENTRADA DE LA GUI ---
 

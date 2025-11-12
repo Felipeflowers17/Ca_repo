@@ -2,77 +2,71 @@
 """
 Diálogo de Configuración de Reglas.
 
-Versión 7.2 (Corrige QInputDialog.getInt)
-- Corregido el AttributeError por usar 'min' y 'max' como keywords.
+Versión 7.3 (Piloto Automático)
+- Añadida pestaña de Automatización.
+- Carga/Guarda configuración desde SettingsManager.
+- Señal 'reglas_actualizadas' renombrada a 'settings_changed'.
 """
 
 from PySide6.QtWidgets import (
-    QDialog,
-    QVBoxLayout,
-    QHBoxLayout,
-    QLabel,
-    QSpinBox,
-    QComboBox,
-    QPushButton,
-    QDialogButtonBox,
-    QLineEdit,
-    QTabWidget,
-    QWidget,
-    QTableWidget,
-    QAbstractItemView,
-    QHeaderView,
-    QMessageBox,
-    QTableWidgetItem,
-    QMenu,         
-    QInputDialog,  
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSpinBox, QComboBox,
+    QPushButton, QDialogButtonBox, QLineEdit, QTabWidget, QWidget,
+    QTableWidget, QAbstractItemView, QHeaderView, QMessageBox,
+    QTableWidgetItem, QMenu, QInputDialog, QGroupBox, QFormLayout
 )
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtCore import Signal, Slot, Qt
 
 from src.utils.logger import configurar_logger
 from src.db.db_service import DbService
-# --- ¡CAMBIOS DE IMPORTACIÓN! ---
 from src.db.db_models import (
-    CaKeyword, 
-    CaOrganismo, 
-    CaOrganismoRegla,      
-    TipoReglaOrganismo,  
+    CaKeyword, CaOrganismo, CaOrganismoRegla, TipoReglaOrganismo,
 )
+# --- ¡NUEVA IMPORTACIÓN! ---
+from src.utils.settings_manager import SettingsManager
 
 logger = configurar_logger(__name__)
 
-# --- Colores para los estados ---
-COLOR_PRIORITARIO = QColor(230, 255, 230) # Verde claro
-COLOR_NO_DESEADO = QColor(255, 230, 230) # Rojo claro
+COLOR_PRIORITARIO = QColor(230, 255, 230)
+COLOR_NO_DESEADO = QColor(255, 230, 230)
 COLOR_NEUTRO = QColor("white")
 
 
 class GuiSettingsDialog(QDialog):
     """
-    Ventana de diálogo modal para gestionar las reglas de puntuación.
+    Ventana de diálogo modal para gestionar reglas y automatización.
     """
-    reglas_actualizadas = Signal()
+    # --- ¡SEÑAL RENOMBRADA! ---
+    # reglas_actualizadas = Signal()
+    settings_changed = Signal() # Se emite si cualquier config cambia
 
-    def __init__(self, db_service: DbService, parent: QWidget | None = None):
+    def __init__(self, db_service: DbService, settings_manager: SettingsManager, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Configuración del Motor de Puntuación")
+        self.setWindowTitle("Configuración y Automatización")
         self.setModal(True)
-        self.setMinimumSize(800, 600) 
+        self.setMinimumSize(800, 600)
 
         self.db_service = db_service
-        self.reglas_han_cambiado = False
-        
+        self.settings_manager = settings_manager # <-- ¡NUEVO!
+        self.config_ha_cambiado = False # Para saber si emitir la señal
+
+        # ... (atributos de keywords y orgs) ...
         self.organismo_data_cache: dict[int, tuple[QTableWidgetItem, str, int | None]] = {}
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
 
+        # --- Creación de Pestañas ---
         self.tab_keywords = self._crear_tab_keywords()
-        self.tab_organismos = self._crear_tab_organismos() 
+        self.tab_organismos = self._crear_tab_organismos()
+        # --- ¡NUEVA PESTAÑA! ---
+        self.tab_automatizacion = self._crear_tab_automatizacion()
 
         self.tabs.addTab(self.tab_keywords, "Gestión de Keywords")
         self.tabs.addTab(self.tab_organismos, "Gestión de Reglas de Organismo")
+        # --- ¡PESTAÑA AÑADIDA! ---
+        self.tabs.addTab(self.tab_automatizacion, "Automatización (Piloto Automático)")
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         button_box.rejected.connect(self.on_close)
@@ -86,19 +80,48 @@ class GuiSettingsDialog(QDialog):
 
     @Slot()
     def on_close(self):
-        if self.reglas_han_cambiado:
-            self.reglas_actualizadas.emit()
-        self.reject()
+        """
+        Al cerrar, guarda la configuración de automatización
+        y emite la señal de cambios.
+        """
+        # --- ¡NUEVA LÓGICA DE GUARDADO! ---
+        try:
+            # 1. Leer valores de los SpinBox
+            intervalo_f1 = self.auto_fase1_spinbox.value()
+            intervalo_f2 = self.auto_fase2_spinbox.value()
+
+            # 2. Guardar en el SettingsManager
+            self.settings_manager.set_setting("auto_fase1_intervalo_horas", intervalo_f1)
+            self.settings_manager.set_setting("auto_fase2_intervalo_minutos", intervalo_f2)
+            self.settings_manager.save_settings(self.settings_manager.config)
+            
+            # 3. Marcar que hubo cambios (para el timer de gui_main)
+            self.config_ha_cambiado = True 
+            logger.info("Configuración de automatización guardada.")
+            
+        except Exception as e:
+            logger.error(f"Error al guardar configuración de automatización: {e}")
+            QMessageBox.critical(self, "Error", f"No se pudo guardar la configuración de automatización:\n{e}")
+
+        # Si hubo cambios en keywords, organismos O automatización, emitir señal.
+        if self.config_ha_cambiado:
+            self.settings_changed.emit()
+            
+        self.reject() # Cierra el diálogo
 
     def _load_all_data(self):
-        """Carga los datos en ambas tablas."""
+        """Carga los datos en todas las pestañas."""
+        # Keywords
         self._load_keywords_table()
-        
+        # Organismos
         self.organismo_data_cache.clear()
         self._load_organismos_table_master()
+        # --- ¡CARGAR DATOS DE AUTOMATIZACIÓN! ---
+        self._load_automatizacion_settings()
 
     # --- Pestaña de Keywords (SIN CAMBIOS) ---
     def _crear_tab_keywords(self) -> QWidget:
+        # ... (Tu código de _crear_tab_keywords va aquí, no ha cambiado)
         widget = QWidget()
         layout = QHBoxLayout(widget)
         left_layout = QVBoxLayout()
@@ -137,8 +160,9 @@ class GuiSettingsDialog(QDialog):
         layout.addLayout(left_layout, 3)
         layout.addLayout(right_layout, 1)
         return widget
-
+        
     def _load_keywords_table(self):
+        # ... (Tu código de _load_keywords_table va aquí, no ha cambiado)
         self.keywords_table.setRowCount(0)
         try:
             keywords = self.db_service.get_all_keywords()
@@ -154,6 +178,7 @@ class GuiSettingsDialog(QDialog):
 
     @Slot()
     def _on_add_keyword(self):
+        # ... (Tu código de _on_add_keyword va aquí, no ha cambiado)
         keyword = self.kw_input.text().strip().lower()
         tipo = self.kw_tipo_combo.currentData()
         puntos = self.kw_puntos_spin.value()
@@ -162,7 +187,7 @@ class GuiSettingsDialog(QDialog):
             return
         try:
             self.db_service.add_keyword(keyword, tipo, puntos)
-            self.reglas_han_cambiado = True
+            self.config_ha_cambiado = True # <-- ÚNICO CAMBIO
             self.kw_input.clear()
             self._load_keywords_table()
         except Exception as e:
@@ -171,6 +196,7 @@ class GuiSettingsDialog(QDialog):
 
     @Slot()
     def _on_delete_keyword(self):
+        # ... (Tu código de _on_delete_keyword va aquí, no ha cambiado)
         selected_items = self.keywords_table.selectedItems()
         if not selected_items:
             QMessageBox.warning(self, "Error", "Seleccione una fila para eliminar.")
@@ -186,21 +212,17 @@ class GuiSettingsDialog(QDialog):
         if confirm == QMessageBox.StandardButton.Yes:
             try:
                 self.db_service.delete_keyword(keyword_id)
-                self.reglas_han_cambiado = True
+                self.config_ha_cambiado = True # <-- ÚNICO CAMBIO
                 self._load_keywords_table()
             except Exception as e:
                 logger.error(f"Error al eliminar keyword: {e}")
                 QMessageBox.critical(self, "Error", f"No se pudo eliminar la keyword:\n{e}")
 
-
-    # --- Pestaña de Organismos (REDİSEÑADA) ---
-
+    # --- Pestaña de Organismos (SIN CAMBIOS) ---
     def _crear_tab_organismos(self) -> QWidget:
-        """Crea el widget de la pestaña de Organismos (Diseño Maestro)."""
+        # ... (Tu código de _crear_tab_organismos va aquí, no ha cambiado)
         widget = QWidget()
         layout = QVBoxLayout(widget)
-
-        # --- Barra de Filtro ---
         filter_layout = QHBoxLayout()
         filter_layout.addWidget(QLabel("Filtrar Organismo:"))
         self.org_filter_input = QLineEdit()
@@ -208,8 +230,6 @@ class GuiSettingsDialog(QDialog):
         self.org_filter_input.textChanged.connect(self._on_filter_organismos)
         filter_layout.addWidget(self.org_filter_input)
         layout.addLayout(filter_layout)
-
-        # --- Tabla Maestra de Organismos ---
         self.org_table = QTableWidget()
         self.org_table.setColumnCount(4)
         self.org_table.setHorizontalHeaderLabels(["Organismo ID", "Nombre Organismo", "Estado", "Puntos"])
@@ -219,35 +239,26 @@ class GuiSettingsDialog(QDialog):
         self.org_table.setColumnHidden(0, True)
         self.org_table.setSortingEnabled(True)
         layout.addWidget(self.org_table)
-        
-        # --- Habilitar Menú Contextual ---
         self.org_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.org_table.customContextMenuRequested.connect(self._on_organismo_context_menu)
-
         layout.addWidget(QLabel("Haga clic derecho en un organismo para cambiar su estado (Prioritario, No Deseado, No Prioritario)."))
-        
         return widget
 
     def _load_organismos_table_master(self):
-        """
-        Carga la tabla maestra con TODOS los organismos y sus reglas.
-        """
+        # ... (Tu código de _load_organismos_table_master va aquí, no ha cambiado)
         self.org_table.setSortingEnabled(False) 
         self.org_table.setRowCount(0)
         self.organismo_data_cache.clear()
-
         try:
             all_organisms = self.db_service.get_all_organisms()
             all_reglas = self.db_service.get_all_organismo_reglas()
             reglas_map = {regla.organismo_id: regla for regla in all_reglas}
             self.org_table.setRowCount(len(all_organisms))
-
             for row, org in enumerate(all_organisms):
                 estado_str = "No Prioritario"
                 puntos_str = "---"
                 puntos_val = None
                 color = COLOR_NEUTRO
-
                 regla = reglas_map.get(org.organismo_id)
                 if regla:
                     if regla.tipo == TipoReglaOrganismo.PRIORITARIO:
@@ -259,23 +270,18 @@ class GuiSettingsDialog(QDialog):
                         estado_str = "No Deseado"
                         puntos_str = "N/A"
                         color = COLOR_NO_DESEADO
-
                 item_id = QTableWidgetItem(str(org.organismo_id))
                 item_nombre = QTableWidgetItem(org.nombre)
                 item_estado = QTableWidgetItem(estado_str)
                 item_puntos = QTableWidgetItem(puntos_str)
-                
                 item_id.setData(Qt.ItemDataRole.UserRole, org.organismo_id) 
                 item_estado.setData(Qt.ItemDataRole.UserRole, (estado_str, puntos_val))
-                
                 for item in (item_id, item_nombre, item_estado, item_puntos):
                     item.setBackground(QBrush(color))
-
                 self.org_table.setItem(row, 0, item_id)
                 self.org_table.setItem(row, 1, item_nombre)
                 self.org_table.setItem(row, 2, item_estado)
                 self.org_table.setItem(row, 3, item_puntos)
-
         except Exception as e:
             logger.error(f"Error al cargar tabla maestra de organismos: {e}", exc_info=True)
             QMessageBox.critical(self, "Error", f"No se pudieron cargar los organismos: {e}")
@@ -284,7 +290,7 @@ class GuiSettingsDialog(QDialog):
 
     @Slot(str)
     def _on_filter_organismos(self, text: str):
-        """Filtra la tabla de organismos por nombre."""
+        # ... (Tu código de _on_filter_organismos va aquí, no ha cambiado)
         texto_filtro = text.lower().strip()
         for row in range(self.org_table.rowCount()):
             nombre_item = self.org_table.item(row, 1) 
@@ -294,37 +300,30 @@ class GuiSettingsDialog(QDialog):
 
     @Slot(QTableWidgetItem)
     def _on_organismo_context_menu(self, pos):
-        """Muestra el menú contextual al hacer clic derecho."""
+        # ... (Tu código de _on_organismo_context_menu va aquí, no ha cambiado)
         selected_items = self.org_table.selectedItems()
         if not selected_items:
             return
-        
         selected_row = self.org_table.row(selected_items[0])
         org_id_item = self.org_table.item(selected_row, 0)
         org_nombre_item = self.org_table.item(selected_row, 1)
         estado_item = self.org_table.item(selected_row, 2)
-        
         if not (org_id_item and org_nombre_item and estado_item):
             return
-
         organismo_id = int(org_id_item.text())
         organismo_nombre = org_nombre_item.text()
         current_estado, current_puntos = estado_item.data(Qt.ItemDataRole.UserRole)
-
         menu = QMenu()
         menu.setWindowTitle(f"Opciones para: {organismo_nombre}")
-
         action_prioritario = menu.addAction("Mover a 'Prioritario'")
         action_no_deseado = menu.addAction("Mover a 'No Deseado'")
         action_no_prioritario = menu.addAction("Mover a 'No Prioritario' (Neutro)")
-
         if current_estado == "Prioritario":
             action_prioritario.setEnabled(False)
         elif current_estado == "No Deseado":
             action_no_deseado.setEnabled(False)
         elif current_estado == "No Prioritario":
             action_no_prioritario.setEnabled(False)
-
         action_prioritario.triggered.connect(
             lambda: self._on_set_prioritario(organismo_id, organismo_nombre, current_puntos)
         )
@@ -334,28 +333,17 @@ class GuiSettingsDialog(QDialog):
         action_no_prioritario.triggered.connect(
             lambda: self._on_set_no_prioritario(organismo_id)
         )
-
         menu.exec(self.org_table.viewport().mapToGlobal(pos))
 
     @Slot()
     def _on_set_prioritario(self, organismo_id: int, organismo_nombre: str, current_puntos: int | None):
-        """Acción para mover un organismo a 'Prioritario'."""
+        # ... (Tu código de _on_set_prioritario va aquí, no ha cambiado)
         default_puntos = current_puntos if current_puntos is not None else 5
-        
-        # --- ¡CORRECCIÓN! ---
-        # Se cambian los argumentos 'min=1' y 'max=100' (keywords)
-        # por argumentos posicionales (1, 100), que es lo que la
-        # función QInputDialog.getInt espera.
         puntos, ok = QInputDialog.getInt(
-            self,                                    # parent
-            "Definir Puntos",                        # title
-            f"Ingrese los puntos para:\n'{organismo_nombre}'", # label
-            default_puntos,                          # value (posicional)
-            1,                                       # min (posicional)
-            100                                      # max (posicional)
+            self, "Definir Puntos",
+            f"Ingrese los puntos para:\n'{organismo_nombre}'",
+            default_puntos, 1, 100
         )
-        # --- FIN CORRECCIÓN ---
-        
         if ok:
             try:
                 self.db_service.set_organismo_regla(
@@ -363,22 +351,22 @@ class GuiSettingsDialog(QDialog):
                     tipo=TipoReglaOrganismo.PRIORITARIO,
                     puntos=puntos
                 )
-                self.reglas_han_cambiado = True
-                self._load_organismos_table_master() # Recargar la tabla
+                self.config_ha_cambiado = True # <-- ÚNICO CAMBIO
+                self._load_organismos_table_master()
             except Exception as e:
                 logger.error(f"Error al mover a Prioritario: {e}")
                 QMessageBox.critical(self, "Error", f"No se pudo guardar la regla:\n{e}")
 
     @Slot()
     def _on_set_no_deseado(self, organismo_id: int):
-        """Acción para mover un organismo a 'No Deseado'."""
+        # ... (Tu código de _on_set_no_deseado va aquí, no ha cambiado)
         try:
             self.db_service.set_organismo_regla(
                 organismo_id=organismo_id,
                 tipo=TipoReglaOrganismo.NO_DESEADO,
                 puntos=None
             )
-            self.reglas_han_cambiado = True
+            self.config_ha_cambiado = True # <-- ÚNICO CAMBIO
             self._load_organismos_table_master()
         except Exception as e:
             logger.error(f"Error al mover a No Deseado: {e}")
@@ -386,14 +374,72 @@ class GuiSettingsDialog(QDialog):
 
     @Slot()
     def _on_set_no_prioritario(self, organismo_id: int):
-        """Acción para mover un organismo a 'No Prioritario' (elimina la regla)."""
+        # ... (Tu código de _on_set_no_prioritario va aquí, no ha cambiado)
         try:
             self.db_service.delete_organismo_regla(organismo_id)
-            self.reglas_han_cambiado = True
+            self.config_ha_cambiado = True # <-- ÚNICO CAMBIO
             self._load_organismos_table_master()
         except Exception as e:
             logger.error(f"Error al mover a No Prioritario: {e}")
             QMessageBox.critical(self, "Error", f"No se pudo eliminar la regla:\n{e}")
+
+    # ---
+    # --- ¡NUEVOS MÉTODOS PARA AUTOMATIZACIÓN! ---
+    # ---
+    
+    def _crear_tab_automatizacion(self) -> QWidget:
+        """Crea la pestaña de configuración del 'Piloto Automático'."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # --- Grupo 1: Búsqueda de Nuevas CAs (Fase 1) ---
+        group1_box = QGroupBox("Búsqueda de Nuevas CAs")
+        form_layout1 = QFormLayout()
+        
+        self.auto_fase1_spinbox = QSpinBox()
+        self.auto_fase1_spinbox.setRange(0, 168) # 0 = apagado, max 1 semana (7*24)
+        self.auto_fase1_spinbox.setSuffix(" horas")
+        self.auto_fase1_spinbox.setToolTip(
+            "Establece cada cuántas horas buscar CAs nuevas.\n"
+            "0 = Apagado."
+        )
+        
+        form_layout1.addRow(
+            "Buscar CAs nuevas (del día anterior) cada:",
+            self.auto_fase1_spinbox
+        )
+        group1_box.setLayout(form_layout1)
+        layout.addWidget(group1_box)
+
+        # --- Grupo 2: Actualización de CAs en Seguimiento (Fase 2) ---
+        group2_box = QGroupBox("Actualización de CAs en Seguimiento")
+        form_layout2 = QFormLayout()
+        
+        self.auto_fase2_spinbox = QSpinBox()
+        self.auto_fase2_spinbox.setRange(0, 10080) # 0 = apagado, max 7 días en minutos
+        self.auto_fase2_spinbox.setSuffix(" minutos")
+        self.auto_fase2_spinbox.setToolTip(
+            "Establece cada cuántos minutos actualizar las CAs de las pestañas 2, 3 y 4.\n"
+            "0 = Apagado. (Recomendado: 60 minutos)"
+        )
+
+        form_layout2.addRow(
+            "Actualizar fichas (Tabs 2-4) cada:",
+            self.auto_fase2_spinbox
+        )
+        group2_box.setLayout(form_layout2)
+        layout.addWidget(group2_box)
+        
+        layout.addStretch()
+        return widget
+
+    def _load_automatizacion_settings(self):
+        """Carga los valores actuales del 'settings.json' en los SpinBox."""
+        try:
+            intervalo_f1 = self.settings_manager.get_setting("auto_fase1_intervalo_horas")
+            self.auto_fase1_spinbox.setValue(intervalo_f1)
             
-    # --- MÉTODOS ANTIGUOS (YA NO SE USAN) ---
-    # (Están vacíos, no es necesario incluirlos si se borran)
+            intervalo_f2 = self.settings_manager.get_setting("auto_fase2_intervalo_minutos")
+            self.auto_fase2_spinbox.setValue(intervalo_f2)
+        except Exception as e:
+            logger.error(f"Error al cargar configuración de automatización: {e}")
